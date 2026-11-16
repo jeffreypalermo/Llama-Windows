@@ -218,6 +218,19 @@ public sealed class Settings
     public Dictionary<string, string> ModelSpeculativeTypes { get; set; } = new();
 
     /// <summary>
+    /// Per-model extra <c>llama serve</c> arguments, keyed by the server model
+    /// id (<c>repo:quant</c>, or an enrolled model's section name). The value
+    /// is the raw command-line text the user typed (<c>-ncmoe 44 -b 4096</c>),
+    /// the same syntax as <see cref="CustomServeArguments"/>. Rendered into
+    /// that model's single <c>--models-preset</c> section, so the router
+    /// passes the flags to that model only. Validated before it is stored;
+    /// a hand-edited value the preset parser would reject is left out of the
+    /// INI rather than failing every model. Applied on the next load — the
+    /// running router re-reads the preset file, no server restart.
+    /// </summary>
+    public Dictionary<string, string> ModelServeArguments { get; set; } = new();
+
+    /// <summary>
     /// Folders enrolled for model discovery (Settings → General → Model
     /// folders): places the user already keeps GGUF models — another drive,
     /// a private stash — scanned recursively and surfaced as loadable models
@@ -338,18 +351,19 @@ public sealed class Settings
         {
             ProtectedHuggingFaceToken = Common.SecretProtector.Protect(HuggingFaceToken);
             ProtectedServerApiKey = Common.SecretProtector.Protect(ServerApiKey);
-            // The three collections below are shared BY REFERENCE with
-            // background readers/writers (LlamaManager's INI renderer and
-            // folder scan, the draft-head poller — see
-            // DraftHeadDetection.Apply's lock note), and the serializer
-            // traverses them. Save takes the same per-collection locks those
-            // sites use, in declaration order (no lock holder ever acquires
-            // another, so nesting here is deadlock-free). Without this, a
-            // mutation racing the serialization failed the whole save to a
-            // caught "collection was modified".
+            // The collections below are shared BY REFERENCE with background
+            // readers/writers (LlamaManager's INI renderer and folder scan,
+            // the draft-head poller — see DraftHeadDetection.Apply's lock
+            // note), and the serializer traverses them. Save takes the same
+            // per-collection locks those sites use, in declaration order (no
+            // lock holder ever acquires another, so nesting here is
+            // deadlock-free). Without this, a mutation racing the
+            // serialization failed the whole save to a caught "collection
+            // was modified".
             string json;
             lock (ModelContextLengths)
             lock (ModelSpeculativeTypes)
+            lock (ModelServeArguments)
             lock (ModelFolders)
                 json = JsonSerializer.Serialize(this, SettingsJsonContext.Default.Settings);
             File.WriteAllText(SettingsPath, json);

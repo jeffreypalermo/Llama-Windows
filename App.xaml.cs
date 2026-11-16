@@ -253,6 +253,10 @@ namespace LlamaApp
             // entries (draft-dflash/…) detected from Hub repo listings ride
             // beside the context lengths (see DraftHeadDetection).
             Llama.LlamaManager.Shared.ModelSpeculativeTypes = Settings.Current.ModelSpeculativeTypes;
+            // Per-model extra server arguments share that INI section: the
+            // details view stores the raw flag text, and the renderer merges
+            // it with ctx-size / spec-type for that model only.
+            Llama.LlamaManager.Shared.ModelServeArguments = Settings.Current.ModelServeArguments;
             // Enrolled model folders share the same INI channel: the recursive
             // scan (Settings → General → Model folders) renders a
             // model = path section per discovery.

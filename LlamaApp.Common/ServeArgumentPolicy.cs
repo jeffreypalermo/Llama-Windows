@@ -67,9 +67,17 @@ public static class ServeArgumentPolicy
 
     /// <summary>The first reserved flag present, matched as <c>--flag</c> or <c>--flag=value</c> (case-insensitive).</summary>
     public static string? FindReservedFlag(IReadOnlyList<string> tokens)
+        => FindFlag(tokens, ReservedFlags);
+
+    /// <summary>
+    /// The first token that is one of <paramref name="flags"/>, matched as
+    /// <c>--flag</c> or <c>--flag=value</c> (case-insensitive). The returned
+    /// spelling is the one from <paramref name="flags"/>, not the user's.
+    /// </summary>
+    public static string? FindFlag(IReadOnlyList<string> tokens, IEnumerable<string> flags)
     {
         foreach (var token in tokens)
-            foreach (var flag in ReservedFlags)
+            foreach (var flag in flags)
                 if (IsFlag(token, flag)) return flag;
         return null;
     }

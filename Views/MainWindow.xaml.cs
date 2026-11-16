@@ -1741,6 +1741,24 @@ namespace LlamaApp.Views
                     // load spawns the child with the new --ctx-size.
                     _ = LlamaManager.Shared.ReloadModelPresetsAsync();
                 },
+                loadServeArguments: id =>
+                {
+                    var args = Settings.Current.ModelServeArguments;
+                    lock (args) return args.TryGetValue(id, out var text) ? text : "";
+                },
+                saveServeArguments: (id, text) =>
+                {
+                    // Same lock as the INI snapshot. Empty text clears the
+                    // entry so a model with no extra arguments leaves no line.
+                    var args = Settings.Current.ModelServeArguments;
+                    lock (args)
+                    {
+                        if (text.Length == 0) args.Remove(id);
+                        else args[id] = text;
+                    }
+                    Settings.Current.Save();
+                    _ = LlamaManager.Shared.ReloadModelPresetsAsync();
+                },
                 // The fit-params refinement awaits CLI processes; its verdicts
                 // can land on a thread-pool thread — flip bound properties on
                 // the UI thread.
@@ -1794,6 +1812,9 @@ namespace LlamaApp.Views
         /// <summary>Swaps the details view back for the models list.</summary>
         private void HideDetails()
         {
+            // The arguments box may still hold an uncommitted edit (Back,
+            // delete, or any other path that drops the view).
+            DetailsView.CommitPendingArguments();
             DisposeDetails();
             DetailsView.Visibility = Visibility.Collapsed;
             FamilyDetailsView.Visibility = Visibility.Collapsed;
@@ -2855,10 +2876,11 @@ namespace LlamaApp.Views
 
         /// <summary>
         /// Removes a model's per-model settings entries (context length /
-        /// speculative type) so the --models-preset INI can't grow ghost
-        /// sections for ids no scan produces anymore. Mutations take the
-        /// dictionaries' locks (see DraftHeadDetection.Apply). Shared by the
-        /// delete path and the vanished-row sweep.
+        /// speculative type / extra arguments) so the --models-preset INI
+        /// can't grow ghost sections for ids no scan produces anymore.
+        /// Mutations take the dictionaries' locks (see
+        /// DraftHeadDetection.Apply). Shared by the delete path and the
+        /// vanished-row sweep.
         /// </summary>
         private static bool PruneModelSettings(string serverModelId)
         {
@@ -2867,6 +2889,8 @@ namespace LlamaApp.Views
             lock (contexts) removed = contexts.Remove(serverModelId);
             var specTypes = Settings.Current.ModelSpeculativeTypes;
             lock (specTypes) removed |= specTypes.Remove(serverModelId);
+            var serveArgs = Settings.Current.ModelServeArguments;
+            lock (serveArgs) removed |= serveArgs.Remove(serverModelId);
             return removed;
         }
 

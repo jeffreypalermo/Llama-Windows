@@ -526,6 +526,17 @@ public sealed class LlamaManager
     public IReadOnlyDictionary<string, string>? ModelSpeculativeTypes { get; set; }
 
     /// <summary>
+    /// Per-model extra <c>llama serve</c> arguments (keyed by server model id),
+    /// stored as typed and rendered into that model's single
+    /// <c>--models-preset</c> section — see
+    /// <see cref="RenderModelsPresetIni"/>. Same command-line syntax as
+    /// <see cref="CustomServeArguments"/>. Set by the caller (App.OnLaunched
+    /// shares <c>Settings.Current.ModelServeArguments</c> by reference, so
+    /// later edits are visible here). Only affects servers the app launches.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? ModelServeArguments { get; set; }
+
+    /// <summary>
     /// Folders enrolled for model discovery (Settings → General → Model
     /// folders), shared by reference from
     /// <c>Settings.Current.ModelFolders</c>: places the user already keeps
@@ -1616,43 +1627,96 @@ public sealed class LlamaManager
         Path.Combine(SharedLlamaDir, "model-context-presets.ini");
 
     /// <summary>
-    /// Renders the llama.cpp <c>--models-preset</c> INI: one
-    /// <c>[repo:quant]</c> section per model that has a custom context length
-    /// and/or a speculative-decoding spec type, as
-    /// <c>ctx-size = N</c> / <c>spec-type = draft-…</c> lines. A model with
-    /// both appears once with both lines. Ids that can't head a section
-    /// safely (brackets, control characters) and values that can't sit on a
-    /// line safely are dropped rather than rendered — see
-    /// <see cref="IsSafeSectionId"/>/<see cref="IsSafeIniValue"/>. Pure so the
-    /// exact shape — the section spelling and key names the router's INI
-    /// parser accepts (<c>rm_leading_dashes</c> of the CLI long options) — is
-    /// unit-testable.
+    /// Renders the llama.cpp <c>--models-preset</c> INI: one <c>[id]</c>
+    /// section per model, merging a custom context length
+    /// (<c>ctx-size</c>), a speculative-decoding type (<c>spec-type</c>),
+    /// enrolled model/sidecar paths, and per-model extra arguments.
+    /// Repeated sections are not merged by llama-server — meeting the
+    /// section name again default-constructs that entry
+    /// (<c>common/preset.cpp</c>), so an earlier <c>ctx-size</c> would be
+    /// discarded. Ids that can't head a section safely (brackets, control
+    /// characters) and values that can't sit on a line safely are dropped
+    /// rather than rendered — see <see cref="IsSafeSectionId"/> /
+    /// <see cref="IsSafeIniValue"/>. An extra-argument string that fails
+    /// <see cref="ModelPresetArguments.TryParse"/> is omitted (a hand-edited
+    /// settings entry must not make the parser reject the whole file) while
+    /// the model's other lines are kept. Pure so the exact shape — the
+    /// section spelling and the key names the router's parser accepts
+    /// (<c>rm_leading_dashes</c> of the CLI options) — is unit-testable.
     /// </summary>
     internal static string RenderModelsPresetIni(
         IEnumerable<KeyValuePair<string, int>> contextLengths,
-        IEnumerable<KeyValuePair<string, string>>? speculativeTypes = null)
+        IEnumerable<KeyValuePair<string, string>>? speculativeTypes = null,
+        IEnumerable<EnrolledFolderModel>? enrolledModels = null,
+        IEnumerable<KeyValuePair<string, string>>? serveArguments = null)
     {
-        var spec = speculativeTypes?.Where(kv => IsSafeIniValue(kv.Value)).ToDictionary() ?? [];
+        var contexts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (id, ctx) in contextLengths)
+            if (ctx > 0) contexts[id] = ctx;
+
+        var spec = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (speculativeTypes is not null)
+            foreach (var (id, specType) in speculativeTypes)
+                if (IsSafeIniValue(specType)) spec[id] = specType;
+
+        var enrolled = new Dictionary<string, EnrolledFolderModel>(StringComparer.Ordinal);
+        if (enrolledModels is not null)
+            foreach (var model in enrolledModels)
+                enrolled[model.Name] = model;
+
+        var serve = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (serveArguments is not null)
+            foreach (var (id, args) in serveArguments)
+                serve[id] = args;
+
+        // Section order follows the historical one: context entries, then
+        // spec-only models, then path-only enrolled models, then models that
+        // have only extra arguments. First occurrence wins.
+        var ids = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        void AddId(string id)
+        {
+            if (seen.Add(id)) ids.Add(id);
+        }
+        foreach (var id in contexts.Keys) AddId(id);
+        foreach (var id in spec.Keys) AddId(id);
+        foreach (var id in enrolled.Keys) AddId(id);
+        foreach (var id in serve.Keys) AddId(id);
 
         var sb = new StringBuilder();
-        foreach (var (id, ctx) in contextLengths)
-        {
-            if (ctx <= 0 || !IsSafeSectionId(id)) continue;
-            sb.Append('[').Append(id).Append(']').Append('\n');
-            sb.Append("ctx-size = ").Append(ctx).Append('\n');
-            if (spec.TryGetValue(id, out var specType))
-            {
-                sb.Append("spec-type = ").Append(specType).Append('\n');
-                spec.Remove(id);
-            }
-            sb.Append('\n');
-        }
-        // Models with only a spec type (no custom context length).
-        foreach (var (id, specType) in spec)
+        foreach (var id in ids)
         {
             if (!IsSafeSectionId(id)) continue;
+
+            var hasContext = contexts.TryGetValue(id, out var ctx);
+            var hasSpec = spec.TryGetValue(id, out var specType);
+            var hasModel = enrolled.TryGetValue(id, out var model);
+            // A string that fails to parse contributes no lines. The model's
+            // other keys are still written — one bad entry must not drop
+            // ctx-size or make the parser reject the file.
+            IReadOnlyList<(string Key, string Value)> extras = [];
+            if (serve.TryGetValue(id, out var rawArgs) &&
+                ModelPresetArguments.TryParse(rawArgs, out var parsed, out _))
+                extras = parsed;
+
+            if (!hasContext && !hasSpec && !hasModel && extras.Count == 0) continue;
+
             sb.Append('[').Append(id).Append(']').Append('\n');
-            sb.Append("spec-type = ").Append(specType).Append('\n').Append('\n');
+            if (hasContext)
+                sb.Append("ctx-size = ").Append(ctx).Append('\n');
+            if (hasSpec)
+                sb.Append("spec-type = ").Append(specType).Append('\n');
+            if (hasModel && model is not null)
+            {
+                sb.Append("model = ").Append(model.ModelPath).Append('\n');
+                if (model.MmprojPath is not null)
+                    sb.Append("mmproj = ").Append(model.MmprojPath).Append('\n');
+                if (model.DraftPath is not null)
+                    sb.Append("spec-draft-model = ").Append(model.DraftPath).Append('\n');
+            }
+            foreach (var (key, value) in extras)
+                sb.Append(key).Append(" = ").Append(value).Append('\n');
+            sb.Append('\n');
         }
         return sb.ToString();
     }
@@ -1682,8 +1746,9 @@ public sealed class LlamaManager
 
     /// <summary>
     /// Writes the <c>--models-preset</c> INI from
-    /// <see cref="ModelContextLengths"/> and
-    /// <see cref="ModelSpeculativeTypes"/> and returns its path — always,
+    /// <see cref="ModelContextLengths"/>,
+    /// <see cref="ModelSpeculativeTypes"/>, and
+    /// <see cref="ModelServeArguments"/> and returns its path — always,
     /// even when empty: the server is launched with <c>--models-preset</c>
     /// unconditionally, so a later <see cref="ReloadModelPresetsAsync"/>
     /// (a settings entry added mid-session — a context length picked, a draft
@@ -1710,6 +1775,9 @@ public sealed class LlamaManager
             if (contexts is not null) lock (contexts) contextItems.AddRange(contexts);
             var specItems = new List<KeyValuePair<string, string>>();
             if (specs is not null) lock (specs) specItems.AddRange(specs);
+            var serveItems = new List<KeyValuePair<string, string>>();
+            if (ModelServeArguments is { } serveArgs)
+                lock (serveArgs) serveItems.AddRange(serveArgs);
 
             // Enrolled model folders (Settings → General → Model folders): a
             // recursive scan is disk I/O, so it runs off the caller's thread —
@@ -1736,23 +1804,27 @@ public sealed class LlamaManager
                 m => m.Name, m => m.ModelPath, StringComparer.OrdinalIgnoreCase);
 
             // Don't render preset sections for models whose files no longer exist:
-            // a ctx / spec-type entry outlives its model (deleted in Explorer, a
-            // folder un-enrolled while the app was off) and the router re-lists a
-            // preset section as a loadable ghost — a row that can't even be
-            // deleted, because there is nothing on disk left to delete.
+            // a ctx / spec-type / extra-argument entry outlives its model
+            // (deleted in Explorer, a folder un-enrolled while the app was off)
+            // and the router re-lists a preset section as a loadable ghost — a
+            // row that can't even be deleted, because there is nothing on disk
+            // left to delete.
             var listed = LastModelsSnapshot;
             bool IsBusy(string id) =>
                 listed.Any(m => m.Id == id && (m.IsDownloading || m.IsLoading));
             bool Exists(string id) => FindModelFilePath(id) is not null;
             contextItems = FilterExistingModels(contextItems, IsBusy, Exists);
             specItems = FilterExistingModels(specItems, IsBusy, Exists);
+            serveItems = FilterExistingModels(serveItems, IsBusy, Exists);
 
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(ContextPresetPath)!);
+                // One section per model. Concatenating a second render of the
+                // enrolled paths would repeat the section header, and
+                // llama-server would drop the context / argument lines.
                 File.WriteAllText(ContextPresetPath,
-                    RenderModelsPresetIni(contextItems, specItems) +
-                    EnrolledFolderScanner.RenderSections(enrolled));
+                    RenderModelsPresetIni(contextItems, specItems, enrolled, serveItems));
                 return ContextPresetPath;
             }
             catch (Exception ex)
