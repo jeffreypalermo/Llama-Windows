@@ -679,4 +679,82 @@ public sealed class ModelItemDetailsViewModelTests
 
         Assert.Empty(vm.ContextLengths); // canceled before the ladder was built
     }
+
+    // ---- Per-model server arguments ----
+
+    [Fact]
+    public void ServeArguments_Load_The_Saved_Text()
+    {
+        var saved = new Dictionary<string, string>
+        {
+            ["unsloth/Qwen3-4B-GGUF:Q4_K_M"] = "-ncmoe 44 -b 4096",
+        };
+        var vm = MakeVm(InstalledItem(), new FakeHost(), new FakePreferences(),
+            loadServeArguments: id => saved.TryGetValue(id, out var text) ? text : "");
+
+        Assert.Equal("-ncmoe 44 -b 4096", vm.ServeArguments);
+        Assert.False(vm.HasServeArgumentsError);
+    }
+
+    [Fact]
+    public void ServeArguments_Commit_Persists_A_Valid_Edit()
+    {
+        var saved = new Dictionary<string, string>();
+        var vm = MakeVm(InstalledItem(), new FakeHost(), new FakePreferences(),
+            loadServeArguments: _ => "",
+            saveServeArguments: (id, text) => saved[id] = text);
+
+        Assert.True(vm.CommitServeArguments("  -ncmoe 44 -b 4096 -ub 2048  "));
+
+        Assert.Equal("-ncmoe 44 -b 4096 -ub 2048", vm.ServeArguments);
+        Assert.False(vm.HasServeArgumentsError);
+        Assert.Equal("-ncmoe 44 -b 4096 -ub 2048", saved["unsloth/Qwen3-4B-GGUF:Q4_K_M"]);
+    }
+
+    [Fact]
+    public void ServeArguments_Commit_Rejects_Reserved_And_Managed_Flags()
+    {
+        var saved = new Dictionary<string, string>();
+        var vm = MakeVm(InstalledItem(), new FakeHost(), new FakePreferences(),
+            loadServeArguments: _ => "-b 4096",
+            saveServeArguments: (id, text) => saved[id] = text);
+
+        Assert.False(vm.CommitServeArguments("--host 0.0.0.0 -b 4096"));
+        Assert.True(vm.HasServeArgumentsError);
+        Assert.Empty(saved);
+        Assert.Equal("-b 4096", vm.ServeArguments);
+
+        Assert.False(vm.CommitServeArguments("-c 131072"));
+        Assert.NotNull(vm.ServeArgumentsError);
+        Assert.Contains("model arguments", vm.ServeArgumentsError);
+        Assert.Empty(saved);
+    }
+
+    [Fact]
+    public void ServeArguments_Commit_Clears_A_Stored_Value_And_Skips_A_Repeat()
+    {
+        var saves = 0;
+        string? stored = "-ncmoe 44";
+        var vm = MakeVm(InstalledItem(), new FakeHost(), new FakePreferences(),
+            loadServeArguments: _ => stored,
+            saveServeArguments: (_, text) => { stored = text; saves++; });
+
+        Assert.True(vm.CommitServeArguments("-ncmoe 44"));
+        Assert.Equal(0, saves);
+
+        Assert.True(vm.CommitServeArguments("  "));
+        Assert.Equal(1, saves);
+        Assert.Equal("", stored);
+        Assert.Equal("", vm.ServeArguments);
+    }
+
+    private static ModelItemDetailsViewModel MakeVm(
+        ModelItem item, FakeHost host, FakePreferences prefs,
+        Func<string, string?>? loadServeArguments,
+        Action<string, string>? saveServeArguments = null)
+        => new(item, host, prefs.Load, prefs.Save,
+            runtimeDetailsLoader: (_, _) => Task.FromResult<ModelRuntimeDetails?>(Details32K),
+            memoryBudgetProbe: _ => Task.FromResult(ulong.MaxValue),
+            loadServeArguments: loadServeArguments,
+            saveServeArguments: saveServeArguments);
 }

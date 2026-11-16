@@ -229,6 +229,36 @@
                 </ItemsControl>
             </StackPanel>
 
+            <!-- Per-model llama-server arguments. Committed when the box
+                 loses focus and again when the details view closes, so a
+                 rejected value is never written and a valid edit reaches the
+                 preset before the next load. -->
+            <StackPanel Spacing="4">
+                <TextBlock Text="Model arguments"
+                           FontSize="13"
+                           FontWeight="SemiBold"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock Text="Extra llama-server arguments for this model only. Same syntax as the command line; they are written into this model's preset together with its context length. --host, --port, --models-preset, and arguments Llama already sets are rejected."
+                           FontSize="11"
+                           Opacity="0.6"
+                           TextWrapping="WrapWholeWords" />
+                <TextBox x:Name="ServeArgumentsBox"
+                         Text="{x:Bind ViewModel.ServeArguments, Mode=OneWay}"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         MinHeight="52"
+                         MaxHeight="96"
+                         PlaceholderText="-ncmoe 44 -b 4096 -ub 2048"
+                         LostFocus="ServeArguments_LostFocus"
+                         AutomationProperties.Name="Model arguments"
+                         ToolTipService.ToolTip="Per-model llama-server arguments, for example -ncmoe, -b, -ub, -ot, -ngl" />
+                <TextBlock Text="{x:Bind ViewModel.ServeArgumentsError, Mode=OneWay}"
+                           FontSize="12"
+                           Foreground="#F85149"
+                           TextWrapping="Wrap"
+                           Visibility="{x:Bind ViewModel.HasServeArgumentsError, Mode=OneWay}" />
+            </StackPanel>
+
             <Rectangle Height="1"
                        Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
 

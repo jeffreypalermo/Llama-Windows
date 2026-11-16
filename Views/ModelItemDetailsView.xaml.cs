@@ -36,8 +36,22 @@ public sealed partial class ModelItemDetailsView : UserControl
     /// <summary>Moves keyboard focus into the view when it opens (best effort).</summary>
     public void FocusFirst() => BackButton.Focus(FocusState.Programmatic);
 
+    /// <summary>
+    /// Writes a pending arguments edit. Called when the box loses focus and
+    /// again by the shell before the view is dropped, so either path persists
+    /// a valid value and neither persists a rejected one.
+    /// </summary>
+    public void CommitPendingArguments()
+        => ViewModel?.CommitServeArguments(ServeArgumentsBox.Text);
+
+    private void ServeArguments_LostFocus(object sender, RoutedEventArgs e)
+        => CommitPendingArguments();
+
     private void Back_Click(object sender, RoutedEventArgs e)
-        => BackRequested?.Invoke(this, EventArgs.Empty);
+    {
+        CommitPendingArguments();
+        BackRequested?.Invoke(this, EventArgs.Empty);
+    }
 
     private void ContextOption_Click(object sender, RoutedEventArgs e)
     {

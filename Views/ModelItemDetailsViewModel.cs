@@ -95,6 +95,7 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
     private readonly Func<CancellationToken, Task<ulong>> _memoryBudgetProbe;
     private readonly Func<string, int, CancellationToken, Task<HardwareFitLevel?>> _fitParamsProbe;
     private readonly Action<Action>? _dispatchToUi;
+    private readonly Action<string, string>? _saveServeArguments;
 
     private CancellationTokenSource? _loadCts;
     private ContextLengthOption? _selectedContextLength;
@@ -105,6 +106,9 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
     private bool _apiRequestCopied;
     private long _modelSizeBytes;
     private bool _openChatWhenLoaded;
+    private string _serveArguments;
+    private string _persistedServeArguments;
+    private string? _serveArgumentsError;
 
     public ModelItemDetailsViewModel(
         ModelItem model,
@@ -114,17 +118,21 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
         Func<string, CancellationToken, Task<ModelRuntimeDetails?>>? runtimeDetailsLoader = null,
         Func<CancellationToken, Task<ulong>>? memoryBudgetProbe = null,
         Func<string, int, CancellationToken, Task<HardwareFitLevel?>>? fitParamsProbe = null,
-        Action<Action>? dispatchToUi = null)
+        Action<Action>? dispatchToUi = null,
+        Func<string, string?>? loadServeArguments = null,
+        Action<string, string>? saveServeArguments = null)
     {
         Model = model;
         _host = host;
         _loadContextPreference = loadContextPreference;
         _saveContextPreference = saveContextPreference;
+        _saveServeArguments = saveServeArguments;
         _runtimeDetailsLoader = runtimeDetailsLoader ?? LoadRuntimeDetailsAsync;
         _memoryBudgetProbe = memoryBudgetProbe
             ?? (token => LlamaManager.Shared.ContextMemoryBudgetAsync(token));
         _fitParamsProbe = fitParamsProbe ?? DefaultFitParamsProbe;
         _dispatchToUi = dispatchToUi;
+        _persistedServeArguments = _serveArguments = loadServeArguments?.Invoke(ServerModelId) ?? "";
 
         // Live state sync: the shared ModelItem already reflects every server
         // state change (the poller drives it), so the details page inherits
@@ -247,6 +255,65 @@ public sealed class ModelItemDetailsViewModel : INotifyPropertyChanged, IDisposa
         if (!option.IsSelectable || !ContextLengths.Contains(option)) return;
         SelectedContextLength = option;
         _saveContextPreference(ServerModelId, option.Tokens);
+    }
+
+    // ---- Per-model server arguments ----
+
+    /// <summary>
+    /// Extra llama-server arguments for this model, as last saved. The text
+    /// box commits through <see cref="CommitServeArguments"/>; this property
+    /// is what the box shows after a successful commit (and on open).
+    /// </summary>
+    public string ServeArguments
+    {
+        get => _serveArguments;
+        private set
+        {
+            if (_serveArguments == value) return;
+            _serveArguments = value;
+            OnPropertyChanged();
+        }
+    }
+
+    /// <summary>Why the arguments last committed were rejected; null when they are fine.</summary>
+    public string? ServeArgumentsError
+    {
+        get => _serveArgumentsError;
+        private set
+        {
+            if (_serveArgumentsError == value) return;
+            _serveArgumentsError = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(HasServeArgumentsError));
+        }
+    }
+
+    /// <summary>True when <see cref="ServeArgumentsError"/> is set (drives the error line).</summary>
+    public bool HasServeArgumentsError => ServeArgumentsError is not null;
+
+    /// <summary>
+    /// Validates <paramref name="text"/> and, when it is acceptable, persists
+    /// it for this model. Reserved flags and arguments Llama already writes
+    /// into the preset are rejected and left unsaved. Empty text clears a
+    /// previously saved value. Returns false when the text was rejected.
+    /// </summary>
+    public bool CommitServeArguments(string? text)
+    {
+        var trimmed = (text ?? "").Trim();
+        if (ModelPresetArguments.Validate(trimmed) is { } error)
+        {
+            ServeArgumentsError = error;
+            return false;
+        }
+
+        ServeArgumentsError = null;
+        ServeArguments = trimmed;
+        if (string.Equals(trimmed, _persistedServeArguments, StringComparison.Ordinal))
+            return true;
+
+        _persistedServeArguments = trimmed;
+        _saveServeArguments?.Invoke(ServerModelId, trimmed);
+        return true;
     }
 
     // ---- Lazy details loading ----

@@ -1,4 +1,3 @@
-using System.Text;
 using LlamaApp.Common;
 
 namespace LlamaApp.Llama;
@@ -165,22 +164,12 @@ public static class EnrolledFolderScanner
     /// section names here are file stems and folder prefixes, which can never
     /// carry <c>/</c> or <c>:</c> on Windows, and every name is vetted against
     /// <c>[</c>/<c>]</c> in <see cref="NameAndOrder"/>). Empty for no models.
+    /// Delegates to <see cref="LlamaManager.RenderModelsPresetIni"/> so a
+    /// model that also has a context length or extra arguments is one
+    /// section, not a second header the server would discard.
     /// </summary>
     public static string RenderSections(IEnumerable<EnrolledFolderModel> models)
-    {
-        var sb = new StringBuilder();
-        foreach (var model in models)
-        {
-            sb.Append('[').Append(model.Name).Append(']').Append('\n');
-            sb.Append("model = ").Append(model.ModelPath).Append('\n');
-            if (model.MmprojPath is not null)
-                sb.Append("mmproj = ").Append(model.MmprojPath).Append('\n');
-            if (model.DraftPath is not null)
-                sb.Append("spec-draft-model = ").Append(model.DraftPath).Append('\n');
-            sb.Append('\n');
-        }
-        return sb.ToString();
-    }
+        => LlamaManager.RenderModelsPresetIni([], enrolledModels: models);
 
     /// <summary>
     /// A <c>.gguf</c> that names a model rather than a sidecar: not an mmproj,
