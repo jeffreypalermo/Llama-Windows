@@ -195,6 +195,9 @@ namespace LlamaApp
             Common.Log.Info(
                 $"listen address: {serverConfig.Listen.Address}{(serverConfig.ApiKey is null ? "" : " (API key required)")}");
             Llama.LlamaManager.Initialize(serverConfig.Port, serverConfig.Listen.Address, serverConfig.ApiKey);
+            Llama.LlamaManager.Shared.AutoRestartOnUnexpectedExit = Settings.Current.AutoRestartServer;
+            Common.Log.Info(
+                $"auto-restart on unexpected exit: {(Settings.Current.AutoRestartServer ? "on" : "off")}");
 
             // The app is tray-only: the main window is created but never shown
             // on launch. It is revealed on demand as a flyout anchored to the
@@ -427,6 +430,10 @@ namespace LlamaApp
             try
             {
                 var manager = Llama.LlamaManager.Shared;
+                // Independent of the launch flags: turning it on or off must
+                // not restart a healthy server, and must still apply when
+                // nothing else in the snapshot changed.
+                manager.AutoRestartOnUnexpectedExit = Settings.Current.AutoRestartServer;
                 if (!manager.ApplyLaunchSettings(BuildLaunchSettings(ResolveServerConfiguration())))
                     return;
 

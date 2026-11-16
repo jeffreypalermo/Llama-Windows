@@ -135,6 +135,7 @@ namespace LlamaApp
             SelectComboBoxTag(KvCacheKBox, s.CacheTypeK, "f16");
             SelectComboBoxTag(KvCacheVBox, s.CacheTypeV, "f16");
             CustomArgsBox.Text = s.CustomServeArguments ?? "";
+            AutoRestartBox.IsChecked = s.AutoRestartServer;
             CustomArgsErrorText.Text = "";
             CustomArgsErrorText.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
             // The OS shortcut is the source of truth: a user may have toggled
@@ -601,6 +602,9 @@ namespace LlamaApp
                 return;
             }
             s.CustomServeArguments = CustomArgsBox.Text.Trim();
+            // Not a launch flag: a running server is left alone. The manager
+            // picks the value up below, including when nothing else changed.
+            s.AutoRestartServer = AutoRestartBox.IsChecked == true;
 
             // Apply the startup preference to the OS (create/delete the .lnk)
             // and mirror it into settings.json as a hint for the checkbox on
