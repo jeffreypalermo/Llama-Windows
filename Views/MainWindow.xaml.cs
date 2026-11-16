@@ -2524,8 +2524,13 @@ namespace LlamaApp.Views
                 // — toast the reason (LlamaManager.FailureMessage) once per
                 // transition into Failed so it isn't missed while hidden.
                 var serverStatus = LlamaManager.Shared.ServerStatus;
+                // A restart we already scheduled will bring the server back;
+                // toasting "stopped" for that blip is the outage the setting
+                // exists to hide. Giving up (budget spent) leaves the flag
+                // clear, so that Failed transition still toasts.
                 if (serverStatus == LlamaManager.ServerState.Failed &&
-                    _lastServerStatus != LlamaManager.ServerState.Failed)
+                    _lastServerStatus != LlamaManager.ServerState.Failed &&
+                    !LlamaManager.Shared.AutoRestartPending)
                 {
                     NotifyWhenHidden("Llama server stopped",
                         LlamaManager.Shared.FailureMessage

@@ -477,6 +477,7 @@
                                 <RowDefinition Height="Auto" /> <!-- Page header -->
                                 <RowDefinition Height="Auto" /> <!-- Port + listen address -->
                                 <RowDefinition Height="Auto" /> <!-- Idle unload + max loaded models -->
+                                <RowDefinition Height="Auto" /> <!-- Auto-restart -->
                                 <RowDefinition Height="Auto" /> <!-- Key/Value cache -->
                                 <RowDefinition Height="Auto" /> <!-- Custom serve arguments -->
                                 <RowDefinition Height="Auto" /> <!-- Installation folder -->
@@ -723,8 +724,50 @@
                                 </Grid>
                             </Border>
 
-                            <!-- Key/Value cache quantization (K and V) -->
+                            <!-- Restart after an unexpected exit (opt-in, off by default) -->
                             <Border Grid.Row="3"
+                                    Grid.ColumnSpan="2"
+                                    Padding="16,14"
+                                    CornerRadius="8"
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0"
+                                            Width="36" Height="36"
+                                            CornerRadius="{ThemeResource ControlCornerRadius}"
+                                            Background="{StaticResource BrandAccentBrush}"
+                                            VerticalAlignment="Top">
+                                        <FontIcon Glyph="&#xE72C;"
+                                                  FontSize="16"
+                                                  Foreground="White"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Spacing="2">
+                                        <TextBlock Text="Restart if the server stops"
+                                                   FontSize="14"
+                                                   FontWeight="SemiBold" />
+                                        <TextBlock Text="If the llama server crashes or is stopped from outside Llama, start it again. Stopping it from the tray menu, saving a setting that restarts it, and quitting Llama do not. If it keeps failing, Llama stops retrying and leaves the server failed until you start it."
+                                                   FontSize="12"
+                                                   Opacity="0.6"
+                                                   TextWrapping="WrapWholeWords" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="AutoRestartBox"
+                                              Grid.Column="2"
+                                              VerticalAlignment="Top"
+                                              MinWidth="0"
+                                              ToolTipService.ToolTip="Automatically restart the llama server after an unexpected exit" />
+                                </Grid>
+                            </Border>
+
+                            <!-- Key/Value cache quantization (K and V) -->
+                            <Border Grid.Row="4"
                                     Grid.ColumnSpan="2"
                                     Padding="16,14"
                                     CornerRadius="8"
@@ -804,7 +847,7 @@
                             </Border>
 
                             <!-- Custom serve arguments (free-form, appended last) -->
-                            <Border Grid.Row="4"
+                            <Border Grid.Row="5"
                                     Grid.ColumnSpan="2"
                                     Padding="16,14"
                                     CornerRadius="8"
@@ -856,7 +899,7 @@
 
                             <!-- Installation folder (read-only — informational,
                                  not a setting) -->
-                            <Border Grid.Row="5"
+                            <Border Grid.Row="6"
                                     Grid.ColumnSpan="2"
                                     Padding="16,14"
                                     CornerRadius="8"
@@ -913,7 +956,7 @@
                             <!-- llama.cpp runtime updater: the weekly auto-update
                                  (RuntimeUpdateScheduler) made visible — installed
                                  version, last check, and a manual trigger. -->
-                            <Border Grid.Row="6"
+                            <Border Grid.Row="7"
                                     Grid.ColumnSpan="2"
                                     Padding="16,14"
                                     CornerRadius="8"

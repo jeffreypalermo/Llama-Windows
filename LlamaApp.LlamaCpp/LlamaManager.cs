@@ -495,6 +495,34 @@ public sealed class LlamaManager
     public string? CustomServeArguments { get; set; }
 
     /// <summary>
+    /// When true, an unexpected exit of a server this app launched (crash, or
+    /// killed from outside the app) is restarted with backoff. Off by default.
+    /// User Stop, a settings-change restart, and app exit all go through
+    /// <see cref="StopServer"/>, which cancels any pending restart and is
+    /// never treated as unexpected. Not a launch flag: toggling it does not
+    /// restart a healthy server, and a server that is already down is left
+    /// for the next start. Set by the app from
+    /// <c>Settings.AutoRestartServer</c>.
+    /// </summary>
+    public bool AutoRestartOnUnexpectedExit
+    {
+        get => _autoRestartEnabled;
+        set
+        {
+            _autoRestartEnabled = value;
+            if (!value) CancelScheduledAutoRestart();
+        }
+    }
+
+    /// <summary>
+    /// True while an automatic restart is waiting out its backoff or about to
+    /// launch. The flyout uses it to skip the "server stopped" toast for a
+    /// failure it is already bringing back. Cleared when the server is
+    /// running again, the retry budget is spent, or the restart is cancelled.
+    /// </summary>
+    public bool AutoRestartPending => _autoRestartPending;
+
+    /// <summary>
     /// Per-model context-length preferences (keyed by server model id,
     /// <c>repo:quant</c>), rendered into a llama.cpp <c>--models-preset</c> INI
     /// at server launch so the router spawns each child with its chosen
@@ -550,6 +578,23 @@ public sealed class LlamaManager
     public IReadOnlyList<string>? ModelFolders { get; set; }
 
     private Process? _serverProcess;
+
+    // Automatic restart after an unexpected exit (see ServerRestartPolicy).
+    // _deliberateStop is set by StopServer (user Stop, settings restart, app
+    // exit, emptying the install) and cleared when the server is Running
+    // again, so a poll already in flight cannot treat that death as a crash.
+    private volatile bool _autoRestartEnabled;
+    private volatile bool _autoRestartPending;
+    private volatile bool _deliberateStop;
+    private readonly object _autoRestartLock = new();
+    private readonly List<DateTime> _unexpectedExits = new();
+    private CancellationTokenSource? _autoRestartCts;
+
+    private const string AutoRestartingMessage =
+        "The llama server stopped responding. Restarting it automatically.";
+
+        private const string AutoRestartPausedMessage =
+        "The llama server stopped repeatedly, so it was not restarted automatically.";
 
     // Single-flight guard for EnsureLlamaOrDownloadAsync / StartServerAsync. Called
     // fire-and-forget from App.OnLaunched and re-entrant via StateChanged
@@ -660,6 +705,13 @@ public sealed class LlamaManager
         {
             if (field == value) return;
             field = value;
+            // Back up means the next death is unexpected again, and a toast
+            // about the outage we just recovered from would be stale.
+            if (value == ServerState.Running)
+            {
+                _deliberateStop = false;
+                _autoRestartPending = false;
+            }
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
     } = ServerState.Stopped;
@@ -1251,8 +1303,20 @@ public sealed class LlamaManager
     /// <see cref="EnsureLlamaOrDownloadAsync"/> once a binary is available. No-op (returns
     /// true) if the server is already running.
     /// </summary>
-    public async Task<bool> StartServerAsync(CancellationToken cancel = default)
+    public Task<bool> StartServerAsync(CancellationToken cancel = default)
+        => StartServerAsync(cancel, cancelPendingAutoRestart: true);
+
+    /// <summary>
+    /// <paramref name="cancelPendingAutoRestart"/> is false when this launch
+    /// IS the automatic restart. Cancelling the schedule from inside it would
+    /// drop the follow-up when the launch itself fails. Every other caller
+    /// cancels a pending delay so a manual Start and a scheduled restart
+    /// cannot both spawn a server.
+    /// </summary>
+    private async Task<bool> StartServerAsync(CancellationToken cancel, bool cancelPendingAutoRestart)
     {
+        if (cancelPendingAutoRestart)
+            CancelScheduledAutoRestart();
         if (ServerStatus == ServerState.Running) return true;
         if (BinaryPath is null || !File.Exists(BinaryPath))
         {
@@ -1300,7 +1364,7 @@ public sealed class LlamaManager
             Log.Warn($"managed llama server (pid {managedPid}) never became reachable; killing and relaunching");
         }
 
-        StopServer(); // reclaim any prior instance / port
+        StopManagedServer(); // reclaim any prior instance / port
 
         // Tokenize the custom arguments BEFORE flipping to Starting: an open
         // quote is a settings error, not a launch attempt, and must fail fast
@@ -1475,9 +1539,11 @@ public sealed class LlamaManager
             // process running: a prior timeout-then-abandon left the server
             // alive, and a later app start (or this same retry) spawned a
             // second on the same port → two servers eating RAM. Kill ours so
-            // the port is free for the next attempt. StopServer sets Stopped
-            // before killing (deliberate intent — the supervisor never leaves
-            // Stopped on its own), then we surface the failure.
+            // the port is free for the next attempt. StopManagedServer sets
+            // Stopped before killing (the supervisor never leaves Stopped on
+            // its own), then we surface the failure. This reclaim is not a
+            // user stop: an automatic restart's own launch must still be able
+            // to try again when it fails.
             Log.Error("llama server launch did not pass its health check; collecting server output");
             // The pipes close when the process exits, so the drain tasks finish
             // almost immediately in the died-at-startup case; the timeout only
@@ -1489,7 +1555,7 @@ public sealed class LlamaManager
             FailureMessage = FormatStartFailureMessage(
                 stderrTail.Snapshot(), ServerPort, ListenAddress, timedOut);
             Log.Error(FailureMessage);
-            StopServer();
+            StopManagedServer();
             ServerStatus = ServerState.Failed;
             return false;
         }
@@ -1498,7 +1564,7 @@ public sealed class LlamaManager
             // WaitForPortAsync observes caller cancellation. Cancellation is
             // also a failed launch: never rethrow while leaving our child and
             // its listening socket behind for the next attempt to collide with.
-            if (_serverProcess is not null) StopServer();
+            if (_serverProcess is not null) StopManagedServer();
             throw;
         }
         catch (Exception ex)
@@ -1506,7 +1572,7 @@ public sealed class LlamaManager
             // The same ownership rule applies to drain/setup/probe failures
             // after Process.Start: clean up only a process spawned by this
             // attempt, never an unrelated process using the configured port.
-            if (_serverProcess is not null) StopServer();
+            if (_serverProcess is not null) StopManagedServer();
             Log.Error(ex, "llama server start threw");
             FailureMessage = ex.Message;
             ServerStatus = ServerState.Failed;
@@ -1569,6 +1635,24 @@ public sealed class LlamaManager
     /// binary) is not ours and is left running.</para>
     /// </summary>
     public void StopServer()
+    {
+        // Deliberate app intent: user Stop, app exit, a settings-change
+        // restart, emptying the install. Cancels a pending automatic restart
+        // and keeps a poll that was already in flight from treating the
+        // death as unexpected (see ApplyPolledStatus).
+        _deliberateStop = true;
+        CancelScheduledAutoRestart();
+        StopManagedServer();
+    }
+
+    /// <summary>
+    /// Kills the managed server and moves to <see cref="ServerState.Stopped"/>
+    /// without counting the stop as user intent. <see cref="StartServerAsync"/>
+    /// uses this to reclaim the port before a launch, including an automatic
+    /// restart's own launch — that reclaim must not cancel the restart or
+    /// suppress a follow-up when the launch fails.
+    /// </summary>
+    private void StopManagedServer()
     {
         ServerStatus = ServerState.Stopped;
 
@@ -2103,10 +2187,30 @@ public sealed class LlamaManager
     /// two transitions that matter operationally: declaring a crash
     /// (<see cref="ServerState.Failed"/>) and confirming/adopting a server
     /// (<see cref="ServerState.Running"/>).
+    /// <paramref name="observed"/> is the status the probe was taken against.
+    /// A stop or launch that landed while the probe was in flight wins: the
+    /// stale derivation is dropped, so a deliberate Stop cannot be rewritten
+    /// as Failed and then auto-restarted.
     /// </summary>
-    private void ApplyPolledStatus(ServerState derived)
+    private void ApplyPolledStatus(ServerState observed, ServerState derived)
     {
-        if (derived == ServerStatus) return;
+        if (ServerStatus != observed) return;
+
+        // StopServer set this before it changed status. A probe that still
+        // observed Running must not declare a crash or schedule a restart.
+        if (_deliberateStop && derived == ServerState.Failed)
+        {
+            CancelScheduledAutoRestart();
+            return;
+        }
+
+        if (derived == observed) return;
+
+        if (derived == ServerState.Failed
+            && observed == ServerState.Running
+            && HandleUnexpectedExit(requireOwnership: true))
+            return;
+
         if (derived == ServerState.Failed)
         {
             Log.Warn("llama server unreachable; declaring it failed (API-polled)");
@@ -2114,9 +2218,207 @@ public sealed class LlamaManager
         }
         else if (derived == ServerState.Running)
         {
+            // A server came back on its own. Don't kill it to "restart" it.
+            CancelScheduledAutoRestart();
             Log.Info($"llama server reachable; {ServerStatus} → Running (API-polled)");
         }
         ServerStatus = derived;
+    }
+
+    /// <summary>
+    /// A server this app launched (this session's process, or the PID file of
+    /// a previous instance) died or stopped answering. When auto-restart is
+    /// on, schedule a backoff restart or, once <see cref="ServerRestartPolicy.FailureLimit"/>
+    /// exits have landed inside the window, leave it Failed. Returns false
+    /// when the caller should keep the ordinary Failed path (setting off,
+    /// or a server we don't own).
+    /// </summary>
+    /// <param name="requireOwnership">
+    /// False for the follow-up after an automatic launch itself failed: the
+    /// reclaim already cleared the process handle and the PID file, but the
+    /// server we are retrying is still the one we owned.
+    /// </param>
+    private bool HandleUnexpectedExit(bool requireOwnership)
+    {
+        if (_deliberateStop || !_autoRestartEnabled) return false;
+        if (requireOwnership && !OwnsManagedServer()) return false;
+
+        var now = DateTime.UtcNow;
+        ServerRestartPolicy.Decision decision;
+        lock (_autoRestartLock)
+        {
+            decision = ServerRestartPolicy.Decide(
+                enabled: true,
+                ServerExitKind.Unexpected,
+                _unexpectedExits,
+                now);
+            _unexpectedExits.Add(now);
+            _unexpectedExits.RemoveAll(at => at > now || now - at >= ServerRestartPolicy.Window);
+        }
+
+        // A stop landed while the decision was computed. Don't burn a retry
+        // on it and don't overwrite the stop with Failed.
+        if (_deliberateStop)
+        {
+            lock (_autoRestartLock)
+            {
+                var recorded = _unexpectedExits.LastIndexOf(now);
+                if (recorded >= 0) _unexpectedExits.RemoveAt(recorded);
+            }
+            CancelScheduledAutoRestart();
+            return true;
+        }
+
+        if (!decision.ShouldRestart)
+        {
+            _autoRestartPending = false;
+            if (!decision.Exhausted) return false;
+
+            Log.Warn(
+                $"not auto-restarting: {decision.FailuresInWindow} unexpected exits " +
+                $"within {ServerRestartPolicy.Window.TotalMinutes:0} minutes; leaving the server Failed");
+            FailureMessage = AutoRestartPausedMessage;
+            if (ServerStatus != ServerState.Failed)
+                ServerStatus = ServerState.Failed;
+            if (_deliberateStop)
+            {
+                ServerStatus = ServerState.Stopped;
+                return true;
+            }
+            return true;
+        }
+
+        Log.Info(
+            $"llama server exited unexpectedly; auto-restart in {decision.Delay.TotalSeconds:0.#}s " +
+            $"(attempt {decision.FailuresInWindow} of {ServerRestartPolicy.MaxRestarts})");
+        var token = ArmAutoRestart();
+        FailureMessage = AutoRestartingMessage;
+        if (ServerStatus != ServerState.Failed)
+            ServerStatus = ServerState.Failed;
+        if (_deliberateStop)
+        {
+            CancelScheduledAutoRestart();
+            ServerStatus = ServerState.Stopped;
+            return true;
+        }
+
+        _ = Task.Run(() => AutoRestartAfterDelayAsync(decision.Delay, decision.FailuresInWindow, token));
+        return true;
+    }
+
+    /// <summary>
+    /// True when the unreachable server is one the app launched: this
+    /// session's process handle, or the PID file a previous instance wrote.
+    /// An external server (no handle, no PID file) is left Failed for the
+    /// user, the same as a manual Stop leaves it running.
+    /// </summary>
+    private bool OwnsManagedServer()
+    {
+        if (_serverProcess is not null) return true;
+        return ReadPidFile(PidFilePath) is not null;
+    }
+
+    /// <summary>
+    /// Publishes a pending restart under the same lock <see cref="StopServer"/>
+    /// uses to cancel it, so a stop cannot miss the token.
+    /// </summary>
+    private CancellationToken ArmAutoRestart()
+    {
+        lock (_autoRestartLock)
+        {
+            // Cancel, but don't dispose: the waiter is still observing the
+            // source, and disposing it turns that wait into
+            // ObjectDisposedException instead of cancellation.
+            _autoRestartCts?.Cancel();
+            var cts = new CancellationTokenSource();
+            _autoRestartCts = cts;
+            _autoRestartPending = true;
+            return cts.Token;
+        }
+    }
+
+    private void CancelScheduledAutoRestart()
+    {
+        lock (_autoRestartLock)
+        {
+            _autoRestartPending = false;
+            _autoRestartCts?.Cancel();
+            _autoRestartCts = null;
+        }
+    }
+
+    /// <summary>
+    /// Waits out the backoff, then launches the managed server. Each attempt
+    /// is logged. A failed launch counts as another unexpected exit so a
+    /// process that dies before it is ready still hits the retry limit.
+    /// Stop, a manual Start, and a settings restart cancel the wait.
+    /// </summary>
+    private async Task AutoRestartAfterDelayAsync(TimeSpan delay, int attempt, CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(delay, token);
+            // A cancelled wait was already dropped by CancelScheduledAutoRestart.
+            // Don't clear pending here: a newer attempt may have armed itself
+            // with a fresh token before this one noticed.
+            if (token.IsCancellationRequested)
+                return;
+            if (_deliberateStop || !_autoRestartEnabled)
+            {
+                _autoRestartPending = false;
+                return;
+            }
+
+            Log.Info(
+                $"auto-restarting the llama server after an unexpected exit " +
+                $"(attempt {attempt} of {ServerRestartPolicy.MaxRestarts})");
+
+            await _ensureGate.WaitAsync(CancellationToken.None);
+            try
+            {
+                if (_deliberateStop || !_autoRestartEnabled)
+                {
+                    _autoRestartPending = false;
+                    return;
+                }
+                if (ServerStatus is ServerState.Running or ServerState.Starting or ServerState.Stopped)
+                {
+                    _autoRestartPending = false;
+                    return;
+                }
+
+                var started = await StartServerAsync(CancellationToken.None, cancelPendingAutoRestart: false);
+                if (_deliberateStop)
+                {
+                    _autoRestartPending = false;
+                    if (ServerStatus != ServerState.Stopped)
+                        ServerStatus = ServerState.Stopped;
+                    return;
+                }
+                if (started || ServerStatus is ServerState.Running or ServerState.Starting)
+                {
+                    _autoRestartPending = false;
+                    return;
+                }
+
+                // The launch never became ready. Count it and maybe try again.
+                // Ownership was already cleared by the reclaim inside Start.
+                if (!HandleUnexpectedExit(requireOwnership: false))
+                    _autoRestartPending = false;
+            }
+            finally { _ensureGate.Release(); }
+        }
+        catch (OperationCanceledException)
+        {
+            // StopServer or a manual Start cancelled the wait.
+        }
+        catch (Exception ex)
+        {
+            // A cancelled attempt must not clear a newer one's pending flag.
+            if (!token.IsCancellationRequested)
+                _autoRestartPending = false;
+            Log.Warn(ex, "auto-restart failed");
+        }
     }
 
     // ---- Supervisor poll pacing / change detection ----
@@ -2244,13 +2546,13 @@ public sealed class LlamaManager
                         }
                         else
                         {
-                            ApplyPolledStatus(DeriveServerStatus(status, await ProbeHealthAsync(CancellationToken.None)));
+                            ApplyPolledStatus(status, DeriveServerStatus(status, await ProbeHealthAsync(CancellationToken.None)));
                         }
                         break;
                     }
                     case ServerState.Starting:
                     case ServerState.Failed:
-                        ApplyPolledStatus(DeriveServerStatus(status, await ProbeHealthAsync(CancellationToken.None)));
+                        ApplyPolledStatus(status, DeriveServerStatus(status, await ProbeHealthAsync(CancellationToken.None)));
                         break;
                     // Stopped: no probe, no transition — see DeriveServerStatus.
                 }

@@ -179,6 +179,18 @@ public sealed class Settings
     public string CustomServeArguments { get; set; } = "";
 
     /// <summary>
+    /// When true, Llama starts the managed llama server again after it exits
+    /// unexpectedly (a crash, or the process being killed from outside the
+    /// app). Off by default. A manual Stop, a restart caused by saving
+    /// settings, and quitting Llama do not count — those are intentional.
+    /// Several failures in a short window stop the retries and leave the
+    /// server failed until the user starts it. Applied live: the manager
+    /// reads it from <see cref="Llama.LlamaManager.AutoRestartOnUnexpectedExit"/>
+    /// and a change does not restart a server that is already running.
+    /// </summary>
+    public bool AutoRestartServer { get; set; }
+
+    /// <summary>
     /// Whether Llama should launch automatically when the user signs in to
     /// Windows. The authoritative state is the presence of the startup
     /// shortcut managed by <see cref="StartupHelper"/> (in the user's Startup
